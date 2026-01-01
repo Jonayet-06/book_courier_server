@@ -6,6 +6,14 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const stripe = require("stripe")(process.env.STRIPE_SECRET);
 
 const port = process.env.PORT || 3000;
+const admin = require("firebase-admin");
+
+const serviceAccount = require("./book-courier-firebase-adminsdk.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
 const generateTrackingId = () => {
   const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
   const time = Date.now().toString().slice(-6);
@@ -23,6 +31,24 @@ const trackingId = generateTrackingId();
 app.use(express.json());
 app.use(cors());
 
+const verifyFBToken = async (req, res, next) => {
+  console.log("header", req.headers.authorization);
+  const token = req.headers.authorization;
+  if (!token) {
+    return res.status(400).send({ message: "Unauthorized Access" });
+  }
+
+  try {
+    const idToken = token.split(" ")[1];
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    console.log("decoded in the token", decoded);
+    req.decoded_email = decoded.email;
+  } catch (error) {
+    return res.status(401).send({ message: "Unauthorized Access" });
+  }
+  next();
+};
+
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.u65jfbo.mongodb.net/?appName=Cluster0`;
 
 const client = new MongoClient(uri, {
@@ -38,20 +64,105 @@ async function run() {
     await client.connect();
 
     const db = client.db("book_courier_client");
-    const booksCollection = db.collection("books");
+    const usersCollection = db.collection("users");
+    const addedNewBooksCollection = db.collection("newBooks");
     const ordersCollection = db.collection("orders");
     const paymentsCollection = db.collection("payments");
+    db.collection("payments").createIndex(
+      { transactionId: 1 },
+      { unique: true }
+    );
 
-    // books api
-    app.get("/books", async (req, res) => {
-      const result = await booksCollection.find().toArray();
+    // users related apis
+    app.post("/users", async (req, res) => {
+      const user = req.body;
+      user.role = "user";
+      user.createdAt = new Date();
+
+      const email = user.email;
+      const userExists = await usersCollection.findOne({ email });
+      if (userExists) {
+        return res.send({ message: "User exists" });
+      }
+      const result = await usersCollection.insertOne(user);
+      res.send(result);
+    });
+
+    app.patch("/users/:id", async (req, res) => {
+      const id = req.params.id;
+      const roleInfo = req.body;
+      const query = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          role: roleInfo.role,
+        },
+      };
+      const result = await usersCollection.updateOne(query, updatedDoc);
+      res.send(result);
+    });
+
+    app.get("/users", async (req, res) => {
+      const result = await usersCollection.find().toArray();
+      res.send(result);
+    });
+
+    // added new books related api
+    app.post("/addedNewBooks", async (req, res) => {
+      const newBook = req.body;
+      newBook.addedAt = new Date();
+      const result = await addedNewBooksCollection.insertOne(newBook);
+      res.send(result);
+    });
+
+    app.get("/addedNewBooks", async (req, res) => {
+      const result = await addedNewBooksCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.patch("/addedNewBooks/:id", async (req, res) => {
+      const id = req.params.id;
+      const updatedInfo = req.body;
+      const query = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          name: updatedInfo.name,
+          author: updatedInfo.author,
+          title: updatedInfo.title,
+          description: updatedInfo.description,
+          image: updatedInfo.image,
+          status: updatedInfo.status,
+          price: updatedInfo.price,
+        },
+      };
+      const result = await addedNewBooksCollection.updateOne(query, updatedDoc);
+      res.send(result);
+    });
+
+    app.patch("/addedNewBooks/status/:id", async (req, res) => {
+      const id = req.params.id;
+      const updatedinfo = req.body;
+      const query = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          status: updatedinfo.status,
+        },
+      };
+      const result = await addedNewBooksCollection.updateOne(query, updatedDoc);
+      res.send(result);
+    });
+
+    app.delete("/addedNewBooks/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await addedNewBooksCollection.deleteOne(query);
       res.send(result);
     });
 
     // get single book
-    app.get("/books/:id", async (req, res) => {
+    app.get("/addedNewBooks/:id", async (req, res) => {
       const id = req.params.id;
-      const result = await booksCollection.findOne({ _id: id });
+      const query = { _id: new ObjectId(id) };
+      const result = await addedNewBooksCollection.findOne(query);
       res.send(result);
     });
 
@@ -78,7 +189,7 @@ async function run() {
       const newOrder = {
         ...order,
         status: "pending",
-        paymentStatus: "unpaid",
+        deliveryStatus: "pending",
         createdAt: new Date(),
       };
       const result = await ordersCollection.insertOne(newOrder);
@@ -184,11 +295,16 @@ async function run() {
     });
 
     // payments related apis
-    app.get("/payments", async (req, res) => {
+    app.get("/payments", verifyFBToken, async (req, res) => {
       const email = req.query.email;
       const query = {};
+
+      // console.log("headers", req.headers);
       if (email) {
         query.customerEmail = email;
+        if (email !== req.decoded_email) {
+          return res.status(403).send({ message: "Forbidden Access" });
+        }
       }
       const result = await paymentsCollection.find(query).toArray();
       res.send(result);
@@ -202,6 +318,24 @@ async function run() {
         },
       };
       const result = await ordersCollection.updateOne(query, update);
+      res.send(result);
+    });
+
+    // librarian related apis
+    app.get("/librarian/orders", async (req, res) => {
+      const result = await ordersCollection.find().toArray();
+      res.send(result);
+    });
+    app.patch("/librarian/status/:id", async (req, res) => {
+      const id = req.params.id;
+      const updatedInfo = req.body;
+      const query = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          deliveryStatus: updatedInfo.deliveryStatus,
+        },
+      };
+      const result = await ordersCollection.updateOne(query, updatedDoc);
       res.send(result);
     });
 
