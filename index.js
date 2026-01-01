@@ -6,9 +6,9 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const stripe = require("stripe")(process.env.STRIPE_SECRET);
 
 const port = process.env.PORT || 3000;
-const admin = require("firebase-admin");
+var admin = require("firebase-admin");
 
-const serviceAccount = require("./book-courier-firebase-adminsdk.json");
+var serviceAccount = require("/serviceAccountKey.json");
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
