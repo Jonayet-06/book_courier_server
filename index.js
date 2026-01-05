@@ -8,7 +8,7 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET);
 const port = process.env.PORT || 3000;
 var admin = require("firebase-admin");
 
-var serviceAccount = require("/serviceAccountKey.json");
+var serviceAccount = require("./book-courier-firebase-adminsdk.json");
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -23,9 +23,6 @@ const generateTrackingId = () => {
 };
 
 const trackingId = generateTrackingId();
-
-// console.log(generateTransactionId());
-// TXN-LQ7K9V-8F3A2C
 
 // middleware
 app.use(express.json());
@@ -67,11 +64,16 @@ async function run() {
     const usersCollection = db.collection("users");
     const addedNewBooksCollection = db.collection("newBooks");
     const ordersCollection = db.collection("orders");
+    const wishlistBooks = db.collection("wishlist");
     const paymentsCollection = db.collection("payments");
     db.collection("payments").createIndex(
       { transactionId: 1 },
       { unique: true }
     );
+
+    addedNewBooksCollection.updateMany({}, [
+      { $set: { price: { $toInt: "$price" } } },
+    ]);
 
     // users related apis
     app.post("/users", async (req, res) => {
@@ -106,6 +108,13 @@ async function run() {
       res.send(result);
     });
 
+    app.get("/users/:email/role", async (req, res) => {
+      const email = req.params.email;
+      const query = { email };
+      const user = await usersCollection.findOne(query);
+      res.send({ role: user?.role || "user" });
+    });
+
     // added new books related api
     app.post("/addedNewBooks", async (req, res) => {
       const newBook = req.body;
@@ -115,7 +124,31 @@ async function run() {
     });
 
     app.get("/addedNewBooks", async (req, res) => {
-      const result = await addedNewBooksCollection.find().toArray();
+      const { searchText, sortOrder } = req.query;
+      const query = {};
+      if (searchText) {
+        query.name = { $regex: searchText, $options: "i" };
+      }
+
+      const sortOption = {};
+      if (sortOrder === "asc") {
+        sortOption.price = 1;
+      } else if (sortOrder === "desc") {
+        sortOption.price = -1;
+      }
+      const result = await addedNewBooksCollection
+        .find(query)
+        .sort(sortOption)
+        .toArray();
+      res.send(result);
+    });
+
+    app.get("/latest-books", async (req, res) => {
+      const result = await addedNewBooksCollection
+        .find()
+        .sort({ addedAt: -1 })
+        .limit(6)
+        .toArray();
       res.send(result);
     });
 
@@ -165,6 +198,62 @@ async function run() {
       const result = await addedNewBooksCollection.findOne(query);
       res.send(result);
     });
+    // wishlist related apis
+    app.get("/wishlist", async (req, res) => {
+      const email = req.query.email;
+      const query = {};
+      if (email) {
+        query.email = email;
+      }
+      const result = await wishlistBooks.find(query).toArray();
+      res.send(result);
+    });
+    app.post("/wishlist", async (req, res) => {
+      const { bookId, email } = req.body;
+
+      const exists = await wishlistBooks.findOne({ bookId, email });
+      if (exists) {
+        return res.status(400).send({ message: "Book already in exists." });
+      }
+      const result = await wishlistBooks.insertOne(req.body);
+      res.send(result);
+    });
+
+    app.post("/addedNewBooks/:id/review", async (req, res) => {
+      const id = req.params.id;
+      const review = req.body;
+
+      const exists = await addedNewBooksCollection.findOne({
+        _id: new ObjectId(id),
+        "reviews.email": review.email,
+      });
+      if (exists) {
+        return res
+          .status(400)
+          .send({ message: "You already reviewd this book." });
+      }
+      review.createdAt = new Date();
+      const reviewQuery = { _id: new ObjectId(id) };
+      const reviewDoc = {
+        $push: {
+          reviews: review,
+        },
+      };
+      const result = await addedNewBooksCollection.updateOne(
+        reviewQuery,
+        reviewDoc
+      );
+      res.send(result);
+    });
+
+    // app.get("/newBooks/:id", async (req, res) => {
+    //   const id = req.params.id;
+    //   const query = {
+    //     _id: new ObjectId(id),
+    //   };
+    //   const book = await addedNewBooksCollection.findOne(query);
+    //   res.send(book);
+    // });
 
     // orders api
     app.get("/orders", async (req, res) => {
